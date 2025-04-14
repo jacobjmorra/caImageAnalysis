@@ -2,12 +2,14 @@ from kneed import KneeLocator
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import pynndescent
 from scipy.interpolate import interp1d
 from scipy.ndimage import gaussian_filter1d
-from scipy.stats import sem, wilcoxon
+from scipy.special import rel_entr
+from scipy.stats import gaussian_kde, sem, wilcoxon
 from sklearn.metrics import auc
 
-from caImageAnalysis.statistics import check_monotonicity_repeated_measures
+from caImageAnalysis.statistics import spearman_correlation_repeated_measures
 
 
 def determine_baseline_frame(temporal_df, pre_frame_num=100, save_path=None):
@@ -364,89 +366,78 @@ def check_if_suppressed(trace, threshold, pre_frame_num=15, min_threshold=None):
     return min_response < threshold and min_response < min_threshold
 
 
-def calculate_percentage_metric_neurons(df, metric, value, filterby=None, inverse=False):
+def calculate_percentage_metric_neurons_per_fish(df, metrics, values, filterby=None, inverse=False):
     """
-    Calculate the percentage of neurons per fish that meet a specific metric condition.
+    Calculate the percentage of neurons per fish that meet specific metric conditions, optionally filtering by specified columns.
     Parameters:
         df (pd.DataFrame): DataFrame containing the data.
-        metric (str): Column name in df to evaluate.
-        value (any): Value that the rows need to match in the metric column.
+        metrics (list of str): List of column names in df to evaluate.
+        values (list of any): List of values that the rows need to match in the corresponding metric columns.
         filterby (list, optional): List of columns to filter the data by. Defaults to None.
-        inverse (bool, optional): If True, calculate percentage where metric is not equal to value. Defaults to False.
+        inverse (bool, optional): If True, calculate percentage where metrics are not equal to values. Defaults to False.
     Returns:
         pd.DataFrame: DataFrame with percentage of metric neurons per fish for each filter group.
     """
+    if not isinstance(metrics, list):
+        metrics = [metrics]
+    if not isinstance(values, list):
+        values = [values]
+    
+    if len(metrics) != len(values):
+        raise ValueError("The length of metrics and values must be the same.")
+
     if filterby is not None:
-        # Check if all filter columns exist in the DataFrame
-        for filter in filterby:
-            if filter not in df.columns:
-                raise ValueError("Given filter is not a column in the df")
-        
-        # Group the DataFrame by the filter columns
-        filter_groups = df.groupby(filterby).size().reset_index()
+        results = dict()
+    else:
+        results = list()
 
-        perc_metric_neurons = dict()
+    for fish_id in df.fish_id.unique():
+        fish_df = df[df.fish_id == fish_id]
 
-        # Iterate over each group in the filter groups
-        for _, row in filter_groups.iterrows():
-            conditions = [row[col] for col in filterby]
+        if filterby:
+            filter_groups = fish_df.groupby(filterby).size().reset_index()
 
-            filters = list()
-            for col, cond in zip(filterby, conditions):
-                if isinstance(cond, str):
-                    filters.append(f"(df['{col}'] == '{cond}')")
-                else:
-                    filters.append(f"(df['{col}'] == {cond})")
+            for _, row in filter_groups.iterrows():
+                conditions = [row[col] for col in filterby]
 
-            subdf = df[eval(" & ".join(filters))]
-            label = " - ".join([str(cond) for cond in conditions])
-            perc_metric_neurons[label] = list()
+                filters = list()
+                for col, cond in zip(filterby, conditions):
+                    if isinstance(cond, str):
+                        filters.append(f"(fish_df['{col}'] == '{cond}')")
+                    else:
+                        filters.append(f"(fish_df['{col}'] == {cond})")
 
-            # Calculate the percentage of metric neurons for each fish
-            for fish in subdf.fish_id.unique():
-                fish_df = df[df.fish_id == fish]
-                sub_fish_df = subdf[subdf.fish_id == fish]
+                sub_fish_df = fish_df[eval(" & ".join(filters))]
+                label = " - ".join([str(cond) for cond in conditions])
+                
+                if label not in results:
+                    results[label] = list()
 
                 if not inverse:
-                    if value is None:
-                        perc_metric_neurons[label].append(len(sub_fish_df[sub_fish_df[metric].isnull()]) / len(fish_df) * 100)
-                    else:
-                        perc_metric_neurons[label].append(len(sub_fish_df[sub_fish_df[metric] == value]) / len(fish_df) * 100)
+                    condition = np.all([sub_fish_df[metric] == value if value is not None else sub_fish_df[metric].isnull() for metric, value in zip(metrics, values)], axis=0)
                 else:
-                    if value is None:
-                        perc_metric_neurons[label].append(len(sub_fish_df[sub_fish_df[metric].notnull()]) / len(fish_df) * 100)
-                    else:
-                        perc_metric_neurons[label].append(len(sub_fish_df[sub_fish_df[metric] != value]) / len(fish_df) * 100)
+                    condition = np.all([sub_fish_df[metric] != value if value is not None else sub_fish_df[metric].notnull() for metric, value in zip(metrics, values)], axis=0)
 
-        # Convert the dictionary to a DataFrame and print it
-        perc_metric_neurons = dict([(k, pd.Series(v)) for k, v in perc_metric_neurons.items()])
-        print(pd.DataFrame(perc_metric_neurons))
-        pd.DataFrame(perc_metric_neurons).to_clipboard()
-        return pd.DataFrame(perc_metric_neurons)
-    
-    else:
-        perc_metric_neurons = list()
-
-        # Calculate the percentage of metric neurons for each fish
-        for fish in df.fish_id.unique():
-            fish_df = df[df.fish_id == fish]
-
+                percentage = len(sub_fish_df[condition]) / len(fish_df) * 100
+                results[label].append(percentage)
+        else:
             if not inverse:
-                if value is None:
-                    perc_metric_neurons.append(len(fish_df[fish_df[metric].isnull()]) / len(fish_df) * 100)
-                else:
-                    perc_metric_neurons.append(len(fish_df[fish_df[metric] == value]) / len(fish_df) * 100)
+                condition = np.all([fish_df[metric] == value if value is not None else fish_df[metric].isnull() for metric, value in zip(metrics, values)], axis=0)
             else:
-                if value is None:
-                    perc_metric_neurons.append(len(fish_df[fish_df[metric].notnull()]) / len(fish_df) * 100)
-                else:
-                    perc_metric_neurons.append(len(fish_df[fish_df[metric] != value]) / len(fish_df) * 100)
+                condition = np.all([fish_df[metric] != value if value is not None else fish_df[metric].notnull() for metric, value in zip(metrics, values)], axis=0)
 
-        # Convert the list to a DataFrame and print it
-        perc_metric_neurons_df = pd.DataFrame(perc_metric_neurons, columns=[value])
-        print(perc_metric_neurons_df)
-        perc_metric_neurons_df.to_clipboard()
-        return perc_metric_neurons_df
+            percentage = len(fish_df[condition]) / len(fish_df) * 100
+            results.append(percentage)
+
+    if filterby is not None:
+        results = dict([(k, pd.Series(v)) for k, v in results.items()])
+        results_df = pd.DataFrame(results)
+    else:
+        results_df = pd.DataFrame(results, columns=["Percentage"])
+    
+    print(results_df)
+    results_df.to_clipboard()
+    return results_df
     
 
 def get_traces(df, pre_frame_num=15, post_frame_num=13, normalize=False, 
@@ -887,7 +878,7 @@ def get_times_to_decay(df, flip_suppressed=True, filterby=None, frame_interval=l
         fps (int): Frames per second for time conversion.
         **kwargs: Additional arguments for get_traces function.
     Returns:
-        dict: Dictionary with THM times for each neuron group or individual neuron.
+        dict: Dictionary with decay times for each neuron group or individual neuron.
     """
 
     return extract_traces_and_apply_function(df, decay_func, flip_suppressed, filterby, frame_interval, fps=fps, **kwargs)
@@ -1124,26 +1115,247 @@ def label_monotonic_neurons(df, alpha=0.05, save_path=None, **kwargs):
     Returns:
         pd.DataFrame: DataFrame with an added 'monotonic' column indicating the type of monotonicity.
     """
-    peaks = get_peaks_across_pulses(df, **kwargs)
-
-    correlations, p_values = check_monotonicity_repeated_measures(peaks, return_results=True)
-
-    correlations = np.array(correlations)
-    p_values = np.array(p_values)
-
-    integrating_neurons = peaks["Values"].columns[(p_values < alpha) & (correlations > 0)]
-    habituating_neurons = peaks["Values"].columns[(p_values < alpha) & (correlations < 0)]
-
     df["monotonic"] = None
+    
     for i, row in df.iterrows():
-        if row["responsive"] == True and i in integrating_neurons:
-            df.loc[i, "monotonic"] = "integrating"
-        elif row["responsive"] == True and i in habituating_neurons:
-            df.loc[i, "monotonic"] = "habituating"
-        elif row["responsive"] == True:
-            df.loc[i, "monotonic"] = "monotonic"
+        if row["responsive"]:
+            peaks = get_peaks_across_pulses(row, **kwargs)
+            [corr], [p_value] = spearman_correlation_repeated_measures(peaks["Values"], verbose=False)
+
+            if row["activated"]:
+                if p_value < alpha and corr > 0:
+                    df.at[i, "monotonic"] = "integrating"
+                elif p_value < alpha and corr < 0:
+                    df.at[i, "monotonic"] = "habituating"
+                elif p_value >= alpha:
+                    df.at[i, "monotonic"] = "monotonic"
+            
+            elif row["suppressed"]:
+                if p_value < alpha and corr > 0:
+                    df.at[i, "monotonic"] = "habituating"
+                elif p_value < alpha and corr < 0:
+                    df.at[i, "monotonic"] = "integrating"
+                elif p_value >= alpha:
+                    df.at[i, "monotonic"] = "monotonic"
 
     if save_path:		
+        df.to_hdf(save_path.joinpath('unrolled_temporal.h5'), key='unrolled_temporal', mode='w')
+
+    return df
+
+
+def label_transient_neurons(df, max_transient_threshold, min_sustained_threshold, save_path=None, **kwargs):
+    """
+    Labels neurons in the DataFrame as 'transient', 'semi-sustained', or 'sustained' based on their decay duration.
+    Parameters:
+        df (pd.DataFrame): DataFrame containing neuron data with a 'responsive' column.
+        max_transient_threshold (float): Maximum threshold for transient responses.
+        min_sustained_threshold (float): Minimum threshold for sustained responses.
+        save_path (str or Path, optional): Path to save the labeled DataFrame as an HDF5 file. Default is None.
+        **kwargs: Additional arguments passed to get_peaks_across_pulses.
+    Returns:
+        pd.DataFrame: DataFrame with an added 'decay_type' column indicating the type of response.
+    """
+    decays = get_decays_across_pulses(df, **kwargs)
+    median_values = decays.median(axis=0)
+
+    transient_neurons = decays["Values"].columns[median_values < max_transient_threshold]
+    sustained_neurons = decays["Values"].columns[median_values > min_sustained_threshold]
+
+    df["decay_type"] = None
+    for i, row in df.iterrows():
+        if row["responsive"] == True and i in transient_neurons:
+            df.loc[i, "decay_type"] = "transient"
+        elif row["responsive"] == True and i in sustained_neurons:
+            df.loc[i, "decay_type"] = "sustained"
+        elif row["responsive"] == True:
+            df.loc[i, "decay_type"] = "semi-sustained"
+
+    if save_path:
         df.to_hdf(save_path.joinpath('unrolled_temporal.h5'), key='unrolled_temporal')
 
     return df
+
+
+def compute_kde(df, axis, x_vals, categories, values, scale_factor=1):
+    """
+    Compute KDEs for given categories along a specified axis.
+    Parameters:
+        df (DataFrame): Input dataframe containing neuron data.
+        axis (int): Axis along which to compute the KDE (0 = LR, 1 = AP, 2 = DV).
+        x_vals (array): Range of values to evaluate the KDE.
+        categories (list of str): Categories to compute KDEs for.
+        values (list of str): Corresponding column names in df for each category.
+        scale_factor (float): Conversion factor for microns per pixel. Default is 1.
+    Returns:
+        np.array: Array of KDE values for each category.
+    """
+    assert len(categories) == len(values), "Categories and values lists must be the same length."
+
+    kdes = []
+
+    for category, value in zip(categories, values):
+        subset = df[df[category] == value]  # Select rows where the value column is True
+        
+        if subset.empty:
+            kdes.append(np.zeros_like(x_vals))  # If no data, return zero density
+        else:
+            if axis == 2:
+                data_values = np.array([p * scale_factor for p in subset["plane"].dropna()])  # Use 'plane' for z-axis
+            else:
+                data_values = np.array([com[axis] * scale_factor for com in subset["com_aligned"].dropna()])
+            
+            try:
+                kdes.append(gaussian_kde(data_values)(x_vals))
+            except ValueError:
+                kdes.append([None] * len(x_vals))
+
+    return np.array(kdes)
+
+
+def extract_xyz_coordinates(df, categories):
+    """
+    Extracts XYZ coordinates for each neuron category.
+    Parameters:
+        df (pd.DataFrame): DataFrame containing neuron spatial information.
+        categories (dict): Dictionary mapping category names to their filter conditions.
+    Returns:
+        dict: Dictionary where keys are category names and values are numpy arrays of XYZ coordinates.
+    """
+    xyz_coordinates = {category: [] for category in categories}
+
+    # Iterate over the DataFrame only once
+    for _, row in df.iterrows():
+        for category, condition in categories.items():
+            if condition(row):
+                xyz_coordinates[category].append([row["com_aligned"][0], 
+                                                  row["com_aligned"][1], 
+                                                  row["plane"]])
+    
+    # Convert lists to numpy arrays
+    return {key: np.array(value) for key, value in xyz_coordinates.items()}
+
+
+def compute_kld(X1, X2, num_samples=100):
+    """
+    Computes the average pairwise Kullback-Leibler divergence (KLD) between two distributions.
+    Parameters:
+        X1 (np.ndarray): XYZ coordinates for the first set of ROIs (shape: Nx3).
+        X2 (np.ndarray): XYZ coordinates for the second set of ROIs (shape: Mx3).
+        num_samples (int): Number of points to sample for KDE evaluation.
+    Returns:
+        float: Symmetrized KLD between the two distributions.
+    """
+    try:
+        # Create KDE estimators for both sets of coordinates
+        kde1 = gaussian_kde(X1.T)  # Transpose because KDE expects (dim, num_samples)
+        kde2 = gaussian_kde(X2.T)
+    except ValueError:
+        # If we only have a couple data points, the KDE may fail
+        return None
+
+    # Define a common evaluation grid spanning both distributions
+    xmin, ymin, zmin = np.minimum(X1.min(axis=0), X2.min(axis=0))
+    xmax, ymax, zmax = np.maximum(X1.max(axis=0), X2.max(axis=0))
+    
+    # Generate a grid of sample points
+    x_vals = np.linspace(xmin, xmax, num_samples)
+    y_vals = np.linspace(ymin, ymax, num_samples)
+    z_vals = np.linspace(zmin, zmax, num_samples)
+    
+    # Create a mesh grid for evaluation
+    X_grid, Y_grid, Z_grid = np.meshgrid(x_vals, y_vals, z_vals, indexing='ij')
+    grid_points = np.vstack([X_grid.ravel(), Y_grid.ravel(), Z_grid.ravel()])  # Shape (3, num_samples^3)
+
+    # Evaluate KDEs on the grid
+    P = kde1(grid_points)
+    Q = kde2(grid_points)
+
+    # Normalize to ensure they are valid probability distributions
+    P /= P.sum()
+    Q /= Q.sum()
+
+    # Compute the Kullback-Leibler divergence in both directions
+    kld_PQ = np.sum(rel_entr(P, Q))  # D_KL(P || Q)
+    kld_QP = np.sum(rel_entr(Q, P))  # D_KL(Q || P)
+
+    # Return the symmetric KLD
+    return (kld_PQ + kld_QP) / 2
+
+
+def compute_same_class_clustering_index(X, labels, max_radius, step=10, n_neighbors=None, randomize=False):
+    """
+    Computes the same-class clustering index at increasing distances, normalized by 
+    global class probability, using PyNNDescent for fast nearest-neighbor search.
+    Parameters:
+        X (np.ndarray): (N, 3) Array of spatial coordinates for each neuron.
+        labels (np.ndarray): Array of class labels for each neuron.
+        max_radius (float): Maximum radius to compute probabilities.
+        step (float): Distance increment to evaluate same-class probability.
+        n_neighbors (int or None): Number of neighbors sampled per iteration. 
+                                    If None or greater than len(X) - 1, it is set to len(X) - 1.
+        randomize (bool): If True, shuffles the labels to compute a random baseline.
+    Returns:
+        pd.DataFrame: A DataFrame where rows represent distance values and columns 
+                        contain same-class clustering indices per neuron for each label.
+    """
+    # Ensure n_neighbors is set appropriately
+    n_neighbors = min(n_neighbors if n_neighbors is not None else len(X) - 1, len(X) - 1)
+    print("Number of neighbors:", n_neighbors)
+
+    # Build nearest-neighbor graph
+    nn_index = pynndescent.NNDescent(X, n_neighbors=n_neighbors, metric="euclidean")
+    indices, distances = nn_index.neighbor_graph
+
+    # If randomize, shuffle the labels
+    if randomize:
+        labels = np.random.permutation(labels)
+
+    unique_labels = np.unique(labels)
+    distance_values = np.arange(step, max_radius + step, step)  # Distance bins
+
+    # Initialize storage for same-class clustering indices
+    same_class_clust_inds = {label: [] for label in unique_labels}
+
+    # Global probability of encountering each class
+    global_probabilities = {label: np.mean(labels == label) for label in unique_labels}
+
+    # Iterate over distances
+    for radius in distance_values:
+        same_class_radius_probs = {label: [] for label in unique_labels}
+
+        for idx, neuron_label in enumerate(labels):
+            # Get neighbors within the current radius
+            neighbor_indices = indices[idx, distances[idx, :] <= radius]
+
+            # Count same-class neighbors
+            same_class_neighbors = np.sum(labels[neighbor_indices] == neuron_label)
+            total_neighbors = len(neighbor_indices)
+
+            same_class_radius_probs[neuron_label].append(same_class_neighbors/total_neighbors)
+
+        # Compute clustering indices for each label
+        for label in unique_labels:
+            clustering_indices = same_class_radius_probs[label]# / global_probabilities[label]
+            same_class_clust_inds[label].append(np.array(clustering_indices))
+
+    # Determine the maximum number of neurons across all categories
+    max_neurons = max(max(arr.shape[0] for arr in cat_list) for cat_list in same_class_clust_inds.values())
+    same_class_clust_inds_df = {}
+
+    for category, distances_list in same_class_clust_inds.items():
+        # Create a 2D array filled with NaNs, shape (num_distances, max_neurons)
+        category_array = np.full((len(distance_values), max_neurons), np.nan)
+
+        # Fill with actual values
+        for i, neuron_values in enumerate(distances_list):
+            category_array[i, :len(neuron_values)] = neuron_values
+
+        # Store in dictionary with multi-index column names
+        for j in range(max_neurons):
+            same_class_clust_inds_df[(category, f"Neuron_{j+1}")] = category_array[:, j]
+    
+    same_class_clust_inds_df = pd.DataFrame(same_class_clust_inds_df, index=distance_values)
+    same_class_clust_inds_df.index.name = "Distance (µm)"
+
+    return same_class_clust_inds_df

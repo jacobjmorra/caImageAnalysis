@@ -21,9 +21,14 @@ def crop_image(image, path=None, crop=0.075):
 
 def rotate_image(image, path=None, angle=0):
     '''Rotates image by angle'''
-    rotated_image = [rotate(img, angle=angle) for img in image]
+    if len(image.shape) == 3:
+        rotated_image = [rotate(img, angle=angle) for img in image]
+    elif len(image.shape) == 2:
+        rotated_image = rotate(image, angle=angle)
+    
     if path is not None:
         imwrite(path, rotated_image, bigtiff=True)
+    
     return rotated_image
 
 

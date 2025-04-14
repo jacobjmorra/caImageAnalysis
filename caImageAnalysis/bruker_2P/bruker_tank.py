@@ -42,6 +42,8 @@ class BrukerTank():
     
     def load_fish(self):
         '''Finds the folders of the  given fish and loads them'''
+        self.fish = []
+        
         with os.scandir(self.folder_path) as entries:
             for entry in entries:
                 if os.path.isdir(entry.path) and entry.name.startswith(self.prefix):
@@ -235,7 +237,7 @@ class BrukerTank():
             dfs.append(df)
 
         self.unrolled_df = pd.concat(dfs, ignore_index=True)
-        self.unrolled_df.to_hdf(self.folder_path.joinpath('unrolled_temporal.h5'), key='unrolled_temporal')
+        self.unrolled_df.to_hdf(self.folder_path.joinpath('unrolled_temporal.h5'), key='unrolled_temporal', mode='w')
 
         self.process_tank_filestructure()
 

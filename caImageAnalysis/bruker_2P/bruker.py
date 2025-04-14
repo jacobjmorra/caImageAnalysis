@@ -583,3 +583,24 @@ class BrukerFish(Fish):
         self.temporal_df.to_hdf(self.exp_path.joinpath('temporal.h5'), key='temporal')
 
         return self.temporal_df
+    
+    def get_microns_per_pixel(self):
+        """
+        Extracts the microns per pixel values for the X, Y, and (if volumetric) Z axes from a Bruker 2P log file.
+        Returns:
+            tuple: A tuple containing the microns per pixel values for the X, Y, and (if volumetric) Z axes.
+        """
+        with open(self.data_paths["log"], 'r') as file:
+            log = file.read()
+
+        Bs_data = BeautifulSoup(log, 'html.parser')
+
+        microns_per_pixel = Bs_data.find_all('pvstatevalue', {'key': 'micronsPerPixel'})
+        x_microns_per_pixel = float(microns_per_pixel[0].find('indexedvalue', {'index': 'XAxis'})['value'])
+        y_microns_per_pixel = float(microns_per_pixel[0].find('indexedvalue', {'index': 'YAxis'})['value'])
+
+        if self.volumetric:
+            z_microns_per_pixel = float(microns_per_pixel[0].find('indexedvalue', {'index': 'ZAxis'})['value'])
+            return (x_microns_per_pixel, y_microns_per_pixel, z_microns_per_pixel)
+        else:
+            return (x_microns_per_pixel, y_microns_per_pixel)
