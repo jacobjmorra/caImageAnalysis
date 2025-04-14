@@ -2,6 +2,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
 from scipy.stats import sem
+import seaborn as sns
 
 from caImageAnalysis.temporal_new import get_traces
 from caImageAnalysis.utils import sort_by_peak, sort_by_peak_with_indices
@@ -152,7 +153,7 @@ def add_row_colors(colors, ax_colorbar, bar_width=0.1):
     return ax_colorbar
 
 
-def plot_random_neurons(df, n_neurons, key="raw_norm_temporal", fps=1.3039181000348583):
+def plot_random_neurons(df, n_neurons, key="raw_norm_temporal", fps=1.3039181000348583, sigma=0):
     """
     Plots the activity of randomly selected neurons from a dataframe.
     Parameters:
@@ -160,6 +161,7 @@ def plot_random_neurons(df, n_neurons, key="raw_norm_temporal", fps=1.3039181000
         n_neurons (int): Number of neurons to randomly select and plot.
         key (str): Column name for neuron activity data. Default is "raw_norm_temporal".
         fps (float): Frames per second for time axis scaling. Default is 1.3039181000348583.
+        sigma (float): Standard deviation for Gaussian kernel. If non-zero, smooths the traces. Default is 0.
     Returns:
         None
     """
@@ -174,6 +176,10 @@ def plot_random_neurons(df, n_neurons, key="raw_norm_temporal", fps=1.3039181000
 
     for i, t in enumerate(traces):
         fig, axes = plt.subplots(1, 1, figsize=(10, 1))
+        
+        if sigma > 0:
+            t = gaussian_filter1d(t, sigma=sigma)
+        
         for pulse in pulse_frames[i]:
             axes.vlines(pulse, 0, 1, color='r')
 
@@ -393,6 +399,7 @@ def plot_average_trace_overlayed(df, overlay_filter, filterby=None, color_order=
         if save_path:
             plt.savefig(save_path.joinpath(f"average_trace_by_{overlay_filter}.pdf"), transparent=True)
 
+
 def plot_pulse_aligned_traces(row, fps=1, draw_lines=[], save_path=None, specific_pulse=None, **kwargs):
     """
     Plots traces aligned to pulses from a single row of a DataFrame.
@@ -430,3 +437,135 @@ def plot_pulse_aligned_traces(row, fps=1, draw_lines=[], save_path=None, specifi
             plt.savefig(save_path.joinpath(f'neuron_{row.name}_pulse_{specific_pulse}_aligned_traces.pdf'), transparent=True)
         else:
             plt.savefig(save_path.joinpath(f'neuron_{row.name}_pulse_aligned_traces.pdf'), transparent=True)
+
+
+def embed_image(image, default_size=1024):
+    """
+    Embeds a 2D image into a larger black square canvas of standardized size.
+    Parameters:
+        image (numpy.ndarray): 2D array representing the image to be embedded.
+        default_size (int): Initial size of the black square canvas. Default is 1024.
+    Returns:
+        numpy.ndarray: New image embedded in a black square canvas.
+    Raises:
+        ValueError: If the input image is not 2D.
+    """
+    if image.ndim == 3:
+        print("please input 2D image")
+        return
+
+    while max(image.shape) > default_size:
+        default_size *= 2
+        print(f"increasing default size to {default_size}")
+
+    new_image = np.zeros((default_size, default_size))
+    midpt = default_size // 2
+
+    image = np.clip(image, a_min=0, a_max=2**16)
+
+    offset_y = 0
+    ydim = image.shape[0]
+    if ydim % 2 != 0:  # if its odd kick it one pixel
+        offset_y += 1
+    offset_x = 0
+    xdim = image.shape[1]
+    if xdim % 2 != 0:  # if its odd kick it one pixel
+        offset_x += 1
+
+    new_image[
+        midpt - ydim // 2 : midpt + ydim // 2 + offset_y,
+        midpt - xdim // 2 : midpt + xdim // 2 + offset_x,
+    ] = image
+
+    return new_image
+
+
+def plot_neuron_location(df, source_img_stack, neuron_idx=None, separate_planes=False, vmax=500):
+    """
+    Plots the spatial location of one or more neurons.
+    Parameters:
+        df (pd.DataFrame): DataFrame containing neuron data.
+        source_img_stack (np.ndarray): Stack of reference images.
+        neuron_idx (int or list, optional): Index or list of indices of the neurons to plot. If None, plots all neurons. Default is None.
+        separate_planes (bool): If True, plots each neuron on a separate plane. If False, plots neurons on the same plane.
+        vmax (int): Maximum value for the colormap normalization.
+    """
+    if neuron_idx is None:
+        neuron_idx = df.index.tolist()
+    elif isinstance(neuron_idx, int):
+        neuron_idx = [neuron_idx]
+
+    if separate_planes:
+        for idx in neuron_idx:
+            fig, ax = plt.subplots(figsize=(5, 5))
+            row = df.loc[idx, :]
+            plane = row["plane"]
+
+            avg_img = source_img_stack[int(plane), :, :]
+
+            if row["region"] == "hindbrain":
+                avg_img = embed_image(avg_img, 1024)
+                plt.xlim(290, 290 + 400)
+                plt.ylim(310 + 400, 310)
+
+            plt.imshow(avg_img, cmap="gray", vmax=vmax)
+            plt.scatter(row['com_aligned'][0], row['com_aligned'][1], color='#D7001C', alpha=0.5, s=75)
+
+            plt.axis('off')
+            plt.title(f"Plane {plane} - Neuron {idx}")
+            plt.show()
+    
+    else:
+        unique_planes = df.loc[neuron_idx, "plane"].unique()
+        for plane in unique_planes:
+            fig, ax = plt.subplots(figsize=(5, 5))
+            avg_img = source_img_stack[int(plane), :, :]
+
+            if df[df["plane"] == plane]["region"].iloc[0] == "hindbrain":
+                avg_img = embed_image(avg_img, 1024)
+                plt.xlim(290, 290 + 400)
+                plt.ylim(310 + 400, 310)
+
+            plt.imshow(avg_img, cmap="gray", vmax=vmax)
+
+            for idx in neuron_idx:
+                row = df.loc[idx, :]
+                if row["plane"] == plane:
+                    plt.scatter(row['com_aligned'][0], row['com_aligned'][1], color='#D7001C', alpha=0.5, s=75)
+
+            plt.axis('off')
+            plt.title(f"Plane {plane}")
+            plt.show()
+
+
+def plot_kde(kde_data, x_vals, colors=None, labels=None):
+    """
+    Plot Kernel Density Estimates (KDEs) for individual fish and the average KDE with Standard Error of the Mean (SEM).
+    Parameters:
+        kde_data (numpy.ndarray): Array where each entry contains KDE values for different categories across multiple fish.
+        x_vals (numpy.ndarray): The x-axis values (spatial positions) corresponding to the KDE estimates.
+    """
+    plt.figure(figsize=(5, 3))
+    
+    # Individual KDEs
+    for fish_kde in kde_data:
+        for i in range(len(fish_kde)):
+            if colors is not None:
+                plt.plot(x_vals, fish_kde[i], color=colors[i], alpha=0.2)
+            else:
+                plt.plot(x_vals, fish_kde[i], alpha=0.2)
+
+    # Compute and plot mean ± SEM
+    mean_kde, sem_kde = np.mean(kde_data, axis=0), sem(kde_data, axis=0)
+    
+    for i in range(len(mean_kde)):
+        if colors is not None:
+            plt.plot(x_vals, mean_kde[i], color=colors[i], label=labels[i] if labels is not None else None)
+            plt.fill_between(x_vals, mean_kde[i] - sem_kde[i], mean_kde[i] + sem_kde[i], color=colors[i], alpha=0.3)
+        else:
+            plt.plot(x_vals, mean_kde[i], label=labels[i] if labels is not None else None)
+            plt.fill_between(x_vals, mean_kde[i] - sem_kde[i], mean_kde[i] + sem_kde[i], alpha=0.3)
+    
+    plt.ylabel('Density')
+    plt.legend()
+    plt.xlim(min(x_vals), max(x_vals))
