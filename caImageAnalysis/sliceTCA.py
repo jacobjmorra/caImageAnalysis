@@ -1,14 +1,339 @@
 from copy import deepcopy
+import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import scipy.ndimage as spnd
 from scipy.stats import sem
+import torch
 
-from caImageAnalysis.temporal_old import sort_by_peak_with_indices
+from caImageAnalysis.temporal_new import get_traces, sort_by_peak_with_indices
+
+
+def create_3d_array(df, n_pulses=4, smooth=True, **kwargs):
+	"""
+	Processes neural data from a DataFrame and organizes it into a 3D array 
+	with dimensions corresponding to pulses, neurons, and time. It also extracts associated 
+	stimuli and region information for each neuron.
+	Parameters:
+		df (pd.DataFrame): Input DataFrame containing neural data.
+		n_pulses (int, optional): Number of pulses to include in the analysis. Default is 4.
+		smooth (bool, optional): Whether to apply Gaussian smoothing to the data. Default is True.
+		**kwargs: Additional keyword arguments passed to the `get_traces` function.
+	Returns:
+		tuple:
+			- np.ndarray: A 3D array of neural data with shape (n_pulses, n_neurons, n_timepoints).
+			- np.ndarray: An array of stimuli corresponding to the neurons.
+			- np.ndarray: An array of regions corresponding to the neurons.
+	Notes:
+		- The function normalizes the neural data by dividing it by its standard deviation.
+	"""
+	_, traces, stimuli = get_traces(df, return_col="stimulus", **kwargs)
+	_, _, regions = get_traces(df, return_col="region", **kwargs)
+	pulses = np.concatenate([np.arange(1, len(row["pulse_frames"]) + 1) for _, row in df.iterrows()])
+
+	raw_neural_data = np.array([np.array(traces)[np.where(pulses == i + 1)] for i in range(n_pulses)])
+
+	# Smooth along the time axis using a Gaussian filter
+	if smooth:
+		neural_data = spnd.gaussian_filter1d(raw_neural_data, sigma=1, axis=-1)
+	else:
+		neural_data = raw_neural_data
+
+	stimuli = np.array([np.array(stimuli)[np.where(pulses == i + 1)] for i in range(n_pulses)])
+	regions = np.array([np.array(regions)[np.where(pulses == i + 1)] for i in range(n_pulses)])
+
+	neural_data = neural_data / neural_data.std()
+
+	return neural_data, stimuli, regions
+
+
+def create_tensor(arr):
+	"""
+	Converts a NumPy array to a PyTorch tensor and moves it to a CPU device.
+	Parameters:
+		arr (numpy.ndarray): Input NumPy array to be converted.
+	Returns:
+		tuple: A tuple containing:
+			- torch.Tensor: Converted PyTorch tensor.
+			- torch.device: Device where the tensor is located (default is CPU).
+	"""
+	device = torch.device("cpu")
+	data = torch.from_numpy(arr).float().to(device)
+	return data, device
+	
+
+def sort_by_stimulus_region(stimuli, regions):
+	"""
+	Sorts indices of stimuli and regions based on stimulus type and region labels.
+	Parameters:
+		stimuli (numpy.ndarray): A 2D array where the first element contains the stimulus label of each neuron.
+		regions (numpy.ndarray): A 2D array where the first element contains the region label of each neuron.
+	Returns:
+		numpy.ndarray: An array of indices that sorts the stimuli first alphabetically by stimulus type 
+			(with "AITC" treated as a special case to appear last), then by region labels within each 
+			stimulus type, and finally by the timing of the peak response.
+	"""
+	# Stimuli are first sorted alphabetically, with "AITC" treated as a special case 
+	# to appear last by temporarily renaming it to "zAITC".
+	_stimuli = np.array(["zAITC" if s == "AITC" else s for s in stimuli[0]])
+	stimulus_sorting = np.argsort(_stimuli)
+
+	last_indices = list()  # include the end frame
+	count = 0
+	stimulus_region_sorting = list()
+	for s in np.unique(_stimuli[stimulus_sorting]):
+		length = len(_stimuli[stimulus_sorting][np.where(_stimuli[stimulus_sorting] == s)])
+		last_idx = count + length - 1
+		last_indices.append(last_idx)
+
+		sorted_region_idxs = np.argsort(regions[0][stimulus_sorting][count:last_idx+1])  # regions sorted in a single stim
+		sorted_idxs = stimulus_sorting[count:last_idx+1][sorted_region_idxs]  # stimulus sorting indices are sorted by region as well
+		stimulus_region_sorting.extend(sorted_idxs)
+
+		count += length
+
+	return np.array(stimulus_region_sorting)
+
+
+def assign_colors(ordered_regions, ordered_stims):
+	"""
+	Assign colors based on the region and stimulus label.
+	Parameters:
+		ordered_regions (list of str): A list of region names (e.g., "hindbrain", "vagal_L", "vagal_R") in the order they are processed.
+		ordered_stims (list of str): A list of stimulus names (e.g., "eggwater", "glucose", "glycine", "AITC") corresponding to each region in `ordered_regions`.
+	Returns:
+		numpy.ndarray: An array of RGB tuples representing the assigned colors for each 
+					   region-stimulus pair.
+	"""
+	region_colors = []
+	for idx, reg in enumerate(ordered_regions):
+		if reg == "hindbrain":
+			if ordered_stims[idx] == "eggwater":
+				region_colors.append(matplotlib.colors.to_rgba("#5E5E5E", alpha=1)[:3])
+			elif ordered_stims[idx] == "glucose":
+				region_colors.append(matplotlib.colors.to_rgba("#F66EB1", alpha=1)[:3])
+			elif ordered_stims[idx] == "glycine":
+				region_colors.append(matplotlib.colors.to_rgba("#208B35", alpha=1)[:3])
+			elif ordered_stims[idx] == "AITC":
+				region_colors.append(matplotlib.colors.to_rgba("#083F90", alpha=1)[:3])
+		
+		elif reg == "vagal_L":
+			if ordered_stims[idx] == "eggwater":
+				region_colors.append(matplotlib.colors.to_rgba("#A6A6A6", alpha=1)[:3])
+			elif ordered_stims[idx] == "glucose":
+				region_colors.append(matplotlib.colors.to_rgba("#F66EB1", alpha=1)[:3])
+			elif ordered_stims[idx] == "glycine":
+				region_colors.append(matplotlib.colors.to_rgba("#66BE22", alpha=1)[:3])
+			elif ordered_stims[idx] == "AITC":
+				region_colors.append(matplotlib.colors.to_rgba("#4485BF", alpha=1)[:3])
+		
+		elif reg == "vagal_R":
+			if ordered_stims[idx] == "eggwater":
+				region_colors.append(matplotlib.colors.to_rgba("#5E5E5E", alpha=1)[:3])
+			elif ordered_stims[idx] == "glucose":
+				region_colors.append(matplotlib.colors.to_rgba("#D40079", alpha=1)[:3])
+			elif ordered_stims[idx] == "glycine":
+				region_colors.append(matplotlib.colors.to_rgba("#208B35", alpha=1)[:3])
+			elif ordered_stims[idx] == "AITC":
+				region_colors.append(matplotlib.colors.to_rgba("#083F90", alpha=1)[:3])
+	
+	return np.array(region_colors)
+
+
+def flip_negative_weights(components):
+	"""
+	Flip the signs of components where the sum of weights is negative.
+	Parameters:
+		components (list): A list of components, where each component is a tuple
+			containing two elements:
+			- A 2D array of weight vectors.
+			- A 2D array of matrices corresponding to the weight vectors.
+	Returns:
+		list: The modified list of components with flipped signs for components
+		where the sum of weights was negative.
+	"""
+	for c, comp in enumerate(components):
+		for i, weights in enumerate(comp[0]):  # iterate over weights of different components
+			if np.sum(weights) < 0:
+				components[c][0][i] *= -1  # Multiply vector
+				components[c][1][i] *= -1  # Multiply matrix
+	return components
+
+
+def order_by_trial_components(components, stimulus_region_sorting, sort_idxs):
+	"""
+	Sorts neurons of trial slices based on their peak activity in the first slice.
+	Parameters:
+		components (array-like): Weights and slices of each component.
+		stimulus_region_sorting (array-like): An array or list of indices representing 
+			the initial sorting order of the neurons.
+		sort_idxs (list or array-like): A list of integers representing the indices that divide the 
+			stimuli into separate groups for sorting.
+	Returns:
+		numpy.ndarray: An array of indices representing the final sorting order 
+		of neurons across all trial slices.
+	"""
+	final_sorting_idx = list()  # include the end frame
+	ordered_components = components[0][1][0][stimulus_region_sorting]
+	
+	for i, idx in enumerate(sort_idxs):
+		if i == 0:
+			comp_idx = np.argsort(np.argmax(ordered_components[:idx+1], axis=1))
+			final_sorting_idx.extend(stimulus_region_sorting[:idx+1][comp_idx])
+		else:
+			comp_idx = np.argsort(np.argmax(ordered_components[sort_idxs[i-1]+1:idx+1], axis=1))
+			final_sorting_idx.extend(stimulus_region_sorting[sort_idxs[i-1]+1:idx+1][comp_idx])
+
+	if sort_idxs[-1] != ordered_components.shape[1]:
+		comp_idx = np.argsort(np.argmax(ordered_components[sort_idxs[-1]+1:], axis=1))
+		final_sorting_idx.extend(stimulus_region_sorting[sort_idxs[-1]+1:][comp_idx])
+
+	return np.array(final_sorting_idx)
+
+
+def order_by_neuron_components(components, stimulus_region_sorting, sort_idxs):
+	"""
+	Orders neuron components based on their weights and classifies them into clusters.
+	Parameters:
+		components (array-like): Weights and slices of each component.
+		stimulus_region_sorting (numpy.ndarray): A 1D array of indices representing the 
+			initial sorting of neurons by their stimulus and region labels.
+		sort_idxs (list): A list of integers representing the indices that divide the 
+			stimuli into separate groups for sorting.
+	Returns:
+		tuple:
+			- numpy.ndarray: A 1D array of final sorting indices for the neuron components.
+			- numpy.ndarray: A 2D array where each row corresponds to the last indices of 
+			  the sorted clusters for each neuron in a specific stimulus region group. 
+			  If a neuron does not have a cluster in a group, the value is NaN.
+	"""
+	final_sorting_idx = list()  # include the end frame
+	ordered_components = components[1][0][:, stimulus_region_sorting]
+
+	last_component_idxs_combined = list()  # final indices of the sorted clusters
+	neuron = components[1][0].shape[0]  # number of neuron components
+	
+	for i, idx in enumerate(sort_idxs):
+		if i == 0:
+			_, sorted_idxs = sort_neurons_by_weight(ordered_components[:, :idx+1])
+			final_sorting_idx.extend(stimulus_region_sorting[:idx+1][sorted_idxs])
+
+			_, _, sort_max_fac = classify_neurons_by_weights(ordered_components[:, :idx+1])
+
+			last_component_idxs = list()
+			for n in range(neuron):
+				try: 
+					last_component_idxs.append(np.where(sort_max_fac == n)[0][-1])
+				except IndexError:
+					last_component_idxs.append(np.nan)
+			last_component_idxs_combined.append(last_component_idxs)
+		else:
+			_, sorted_idxs = sort_neurons_by_weight(ordered_components[:, sort_idxs[i-1]+1:idx+1])
+			final_sorting_idx.extend(stimulus_region_sorting[sort_idxs[i-1]+1:idx+1][sorted_idxs])
+
+			_, _, sort_max_fac = classify_neurons_by_weights(ordered_components[:, sort_idxs[i-1]+1:idx+1])
+
+			last_component_idxs = list()
+			for n in range(neuron):
+				try: 
+					last_component_idxs.append(np.where(sort_max_fac == n)[0][-1])
+				except IndexError:
+					last_component_idxs.append(np.nan)
+			last_component_idxs_combined.append(last_component_idxs)
+
+	if sort_idxs[-1] != ordered_components.shape[1]:
+		_, sorted_idxs = sort_neurons_by_weight(ordered_components[:, sort_idxs[-1]+1:])
+		final_sorting_idx.extend(stimulus_region_sorting[sort_idxs[-1]+1:][sorted_idxs])
+
+		_, _, sort_max_fac = classify_neurons_by_weights(ordered_components[:, sort_idxs[-1]+1:])
+
+		last_component_idxs = list()
+		for n in range(neuron):
+			try: 
+				last_component_idxs.append(np.where(sort_max_fac == n)[0][-1])
+			except IndexError:
+				last_component_idxs.append(np.nan)
+		last_component_idxs_combined.append(last_component_idxs)
+
+	last_component_idxs_combined = np.array(last_component_idxs_combined)
+
+	return np.array(final_sorting_idx), last_component_idxs_combined
+
+
+def sort_neurons_by_weight(components):
+	"""
+	Sort neurons based on their contribution to specific components.
+	Parameters:
+		components (array-like): A 2D array where each column represents a neuron, and each row
+								 corresponds to the weights of that neuron across different components.
+	Returns:
+		tuple: A tuple containing:
+			- sorted_comps (array-like): A 2D array with neurons sorted based on their contribution
+										 and weight within each component.
+			- full_sort (array-like): An array of indices representing the sorting order applied
+									  to the neurons.
+	"""
+	components = deepcopy(components)
+
+	first_sort, sort_fac, sort_max_fac = classify_neurons_by_weights(components)
+
+	# Descending sort within each group of sorted neurons
+	second_sort = list()
+	for i in np.unique(sort_max_fac):
+		second_inds = (np.where(sort_max_fac == i)[0])
+		second_sub_sort = np.argsort(first_sort[i, sort_max_fac == i])
+		second_sort.extend(second_inds[second_sub_sort][::-1])
+
+	# Apply the second sort
+	full_sort = sort_fac[second_sort]
+	sorted_comps = components[:, full_sort]
+
+	return sorted_comps, full_sort
+
+
+def classify_neurons_by_weights(components):
+	"""
+	Classifies neurons by their highest weight across components and sorts them accordingly.
+	Parameters:
+		components (numpy.ndarray): A 2D array where each column represents a neuron, 
+			and each row corresponds to the weights of that neuron across different components.
+	Returns:
+		tuple:
+			- numpy.ndarray: A 2D array of components with neurons sorted by their highest weight.
+			- numpy.ndarray: An array of indices representing the sorting order of neurons.
+			- numpy.ndarray: An array of component indices indicating the component with the highest weight for each neuron.
+	"""
+	# We take the absolute value in case the sliceTCA is initialized as "uniform"
+	max_fac = np.argmax(np.abs(components), axis=0)
+	sort_fac = np.argsort(max_fac)
+	sort_max_fac = max_fac[sort_fac]
+
+	# Sort all neurons across all components based on the component they belong to
+	# (i.e., neurons that belong to component 0, 1, ..., n are grouped together)
+	sorted_comps = components[:, sort_fac]
+
+	return sorted_comps, sort_fac, sort_max_fac
 
 
 def get_classified_neurons(sorted_components, last_component_idxs_combined, last_stimulus_idxs):
-	'''Returns the classified neuron weights and their indices for each component'''
+	"""
+	Classifies neurons into components and returns their weights and indices.
+	Parameters:
+		sorted_components (numpy.ndarray): A 2D array where each row represents a 
+			neuron component and each column represents a neuron weight.
+		last_component_idxs_combined (numpy.ndarray): A 2D array where each row 
+			corresponds to a stimulus, and each column contains the last index 
+			of a neuron component for that stimulus.
+		last_stimulus_idxs (list or numpy.ndarray): A 1D array or list containing 
+			the last indices of neurons for each stimulus.
+	Returns:
+		tuple: A tuple containing:
+			- classified_neurons (dict): A dictionary where keys are component indices 
+			  (int) and values are numpy arrays of neuron weights classified for each component.
+			- classified_neuron_idxs (dict): A dictionary where keys are component indices 
+			  (int) and values are numpy arrays of neuron indices classified for each component.
+	"""
 	classified_neurons = dict()
 	classified_neuron_idxs = dict()
 	for a in range(sorted_components.shape[0]):  # for each neuron component
@@ -67,12 +392,40 @@ def get_classified_neurons(sorted_components, last_component_idxs_combined, last
 		cl_neurons = list()
 		cl_neuron_idxs = list()
 		for start, end in zip(starts, ends):
-			cl_neurons.extend(sorted_components[a][start:end+1])
-			cl_neuron_idxs.extend(np.arange(start, end+1))
+			if not np.isnan(start) and not np.isnan(end):
+				cl_neurons.extend(sorted_components[a][int(start):int(end)+1])
+				cl_neuron_idxs.extend(np.arange(start, end+1))
 		classified_neurons[a] = np.array(cl_neurons)
 		classified_neuron_idxs[a] = np.array(cl_neuron_idxs)
 
 	return classified_neurons, classified_neuron_idxs
+
+
+def calculate_goodness_of_fit(data, reconstruction):
+	"""Calculate goodness of fit for each neuron."""
+	gofs = []
+	for n in range(reconstruction.shape[1]):
+		a = np.sum([(data[k, n, t] - reconstruction[k, n, t]) ** 2 for t in range(reconstruction.shape[2]) for k in range(reconstruction.shape[0])])
+		b = np.sum([data[k, n, t] ** 2 for t in range(reconstruction.shape[2]) for k in range(reconstruction.shape[0])])
+		gofs.append(1 - (a / b))
+	return gofs
+
+
+def calculate_goodness_of_fit_relative_to_average(data, reconstruction):
+	"""Calculate goodness of fit for each neuron, relative to just fitting the average"""
+	gofs = []
+	for n in range(reconstruction.shape[1]):
+		mse = np.mean([(data[k, n, t] - reconstruction[k, n, t]) ** 2 for t in range(reconstruction.shape[2]) for k in range(reconstruction.shape[0])])
+		gof = 1 - (mse/np.var(data[:, n, :]))  # Goodness of fit
+		gofs.append(gof)
+	return gofs
+
+
+
+
+
+
+
 
 
 def plot_top_n_neurons(sorted_components, sorted_data, classified_neurons, classified_neuron_idxs, final_sorting_idx, N_neurons=1, sorted_reconst=None):
@@ -126,12 +479,12 @@ def plot_top_n_neurons(sorted_components, sorted_data, classified_neurons, class
 		# print(highest_weight_idxs)
 
 
-def plot_all_classified_neurons(sorted_components, sorted_data, classified_neurons, classified_neuron_idxs, sorted_reconst=None, savefig=False, save_folder=None):
+def plot_all_classified_neurons(sorted_components, sorted_data, classified_neurons, classified_neuron_idxs, pre_frame_num=0, sorted_reconst=None, savefig=False, save_folder=None):
 	'''Plots the average of all neurons for each component.
 	Only the classified neurons are used for the weight sorting.
 	sorted_reconst: if an array is given, will overlay the reconstructed trace average on top of the actual data'''
 	for a in range(sorted_components.shape[0]):  # for each neuron component
-		highest_weight_neurons = sorted_data[:, classified_neuron_idxs[a], :]
+		highest_weight_neurons = sorted_data[:, classified_neuron_idxs[a].astype(int), :]
 
 		# if there are any top neurons with negative weights, flip those traces
 		if len(np.where(classified_neurons[a] < 0)[0]) > 0:
@@ -154,14 +507,14 @@ def plot_all_classified_neurons(sorted_components, sorted_data, classified_neuro
 
 		fig, axs = plt.subplots(1, sorted_data.shape[0], sharex=True, sharey=True, figsize=(10, 2))
 		for p, pulse in enumerate(avg_trace):
-			axs[p].plot(np.arange(-3, 14), pulse)
-			axs[p].fill_between(np.arange(-3, 14), pulse-sems[p], pulse+sems[p], alpha=0.2)
+			axs[p].plot(np.arange(0-pre_frame_num, sorted_data.shape[2]-pre_frame_num), pulse)
+			axs[p].fill_between(np.arange(0-pre_frame_num, sorted_data.shape[2]-pre_frame_num), pulse-sems[p], pulse+sems[p], alpha=0.2)
 			axs[p].axhline(0, ls="dashed", color="black")
 			axs[p].axvspan(-1, 0, color="red", alpha=0.2)
 
 			if sorted_reconst is not None:
-				axs[p].plot(np.arange(-3, 14), avg_trace_reconst[p], label="Reconstruction", linestyle="dashed")
-				axs[p].fill_between(np.arange(-3, 14), avg_trace_reconst[p]-sems_reconst[p], avg_trace_reconst[p]+sems_reconst[p], alpha=0.2)
+				axs[p].plot(np.arange(0-pre_frame_num, sorted_data.shape[2]-pre_frame_num), avg_trace_reconst[p], label="Reconstruction", linestyle="dashed")
+				axs[p].fill_between(np.arange(0-pre_frame_num, sorted_data.shape[2]-pre_frame_num), avg_trace_reconst[p]-sems_reconst[p], avg_trace_reconst[p]+sems_reconst[p], alpha=0.2)
 
 		if sorted_reconst is not None:
 			plt.legend()
@@ -173,64 +526,10 @@ def plot_all_classified_neurons(sorted_components, sorted_data, classified_neuro
 			plt.savefig(save_folder.joinpath(f"component{a}_avg_all_classified.pdf"), transparent=True)
 
 
-def classify_neurons_by_weights(components):
-	"""
-	Classify and sort neurons according to the component they had the highest weight in.
-
-	Input
-	-------
-	SliceTCA components
-
-	Returns
-	-------
-	sorted_comps, components now with neurons sorted.
-	sort_fac, sort indices to keep track of cell identity
-	sort_max_fac, list of component indices per neuron, showing 
-
-	"""
-	# we take the absolute value in case the sliceTCA is initialized as "uniform"
-	max_fac = np.argmax(np.abs(components), axis=0)
-	sort_fac = np.argsort(max_fac)
-	sort_max_fac = max_fac[sort_fac]
-
-	# sort all neurons across all components based on the component they belong to
-	# (i.e., neurons that belong to component 0, 1, ..., n are grouped together)
-	sorted_comps = components[:, sort_fac]
-
-	return sorted_comps, sort_fac, sort_max_fac
 
 
-def sort_neurons_by_weight(components):
-	"""
-	Sort neurons by which component they contribute to the most.
-	Within each component-responsive sort, neurons are further organized by their weights in descending order.
 
-	Input
-	-------
-	SliceTCA components
 
-	Returns
-	-------
-	sorted_comps, copy of components now with neurons sorted.
-	full_sort, sort indices to keep track of cell identity
-
-	"""
-	components = deepcopy(components)
-
-	first_sort, sort_fac, sort_max_fac = classify_neurons_by_weights(components)
-
-	# descending sort within each group of sorted neurons
-	second_sort = list()
-	for i in np.unique(sort_max_fac):
-		second_inds = (np.where(sort_max_fac == i)[0])
-		second_sub_sort = np.argsort(first_sort[i, sort_max_fac == i])
-		second_sort.extend(second_inds[second_sub_sort][::-1])
-
-	# apply the second sort
-	full_sort = sort_fac[second_sort]
-	sorted_comps = components[:, full_sort]
-
-	return sorted_comps, full_sort
 
 
 def compute_covariance_matrix(data):
@@ -310,12 +609,7 @@ def calculate_variance_explained(eigenvalues, threshold=0.9):
     return num_components
 
 
-def rand_jitter(arr):
-    return arr + np.random.normal(0, 0.1, len(arr))
 
-
-def jitter(x, y, s=20, color='black', marker='o', cmap=None, norm=None, vmin=None, vmax=None, alpha=None, linewidths=None, verts=None, hold=None, **kwargs):
-    return plt.scatter(rand_jitter(x), y, s=s, color=color, marker=marker, cmap=cmap, norm=norm, vmin=vmin, vmax=vmax, alpha=alpha, linewidths=linewidths, **kwargs)
 
 
 def get_all_component_weights(sorted_components, ordered_regions, ordered_stims):
@@ -555,7 +849,7 @@ def get_df_with_classified_neurons(a, sorted_components, sorted_df, last_compone
 	return sorted_df_neurons
 
 
-def plot_all_neurons(sorted_data, sorted_reconst=None):
+def plot_all_neurons(sorted_data, pre_frame_num=0, sorted_reconst=None):
 	'''Plots the average of all neurons in the data.
 	sorted_reconst: if an array is given, will overlay the reconstructed trace average on top of the actual data'''
 	avg_trace = np.mean(sorted_data, axis=1)
@@ -567,14 +861,14 @@ def plot_all_neurons(sorted_data, sorted_reconst=None):
 
 	fig, axs = plt.subplots(1, sorted_data.shape[0], sharex=True, sharey=True, figsize=(10, 2))
 	for p, pulse in enumerate(avg_trace):
-		axs[p].plot(np.arange(-3, 14), pulse)
-		axs[p].fill_between(np.arange(-3, 14), pulse-sems[p], pulse+sems[p], alpha=0.2)
+		axs[p].plot(np.arange(0-pre_frame_num, sorted_data.shape[2]-pre_frame_num), pulse)
+		axs[p].fill_between(np.arange(0-pre_frame_num, sorted_data.shape[2]-pre_frame_num), pulse-sems[p], pulse+sems[p], alpha=0.2)
 		axs[p].axhline(0, ls="dashed", color="black")
 		axs[p].axvspan(-1, 0, color="red", alpha=0.2)
 
 		if sorted_reconst is not None:
-			axs[p].plot(np.arange(-3, 14), avg_trace_reconst[p], label="Reconstruction", linestyle="dashed")
-			axs[p].fill_between(np.arange(-3, 14), avg_trace_reconst[p]-sems_reconst[p], avg_trace_reconst[p]+sems_reconst[p], alpha=0.2)
+			axs[p].plot(np.arange(0-pre_frame_num, sorted_data.shape[2]-pre_frame_num), avg_trace_reconst[p], label="Reconstruction", linestyle="dashed")
+			axs[p].fill_between(np.arange(0-pre_frame_num, sorted_data.shape[2]-pre_frame_num), avg_trace_reconst[p]-sems_reconst[p], avg_trace_reconst[p]+sems_reconst[p], alpha=0.2)
 
 	if sorted_reconst is not None:
 		plt.legend()
@@ -582,108 +876,10 @@ def plot_all_neurons(sorted_data, sorted_reconst=None):
 	fig.suptitle(f"Average of all neurons")
 
 
-def sort_by_stimulus_region(stimuli, regions):
-	_stimuli = np.array(["zAITC" if s == "AITC" else s for s in stimuli[0]])
-	stimulus_sorting = np.argsort(_stimuli)
-
-	last_indices = list()  # include the end frame
-	count = 0
-	stimulus_region_sorting = list()
-	for s in np.unique(_stimuli[stimulus_sorting]):
-		length = len(_stimuli[stimulus_sorting][np.where(_stimuli[stimulus_sorting] == s)])
-		last_idx = count + length - 1
-		last_indices.append(last_idx)
-
-		sorted_region_idxs = np.argsort(regions[0][stimulus_sorting][count:last_idx+1])  # regions sorted in a single stim
-		sorted_idxs = stimulus_sorting[count:last_idx+1][sorted_region_idxs]  # stimulus sorting indices are sorted by region as well
-		stimulus_region_sorting.extend(sorted_idxs)
-
-		count += length
-
-	# Now order by when the peak response occurs
-	stimulus_region_sorting = np.array(stimulus_region_sorting)  # orders both by stim and by region
-
-	return stimulus_region_sorting
 
 
-def order_by_trial_components(components, stimulus_region_sorting, sort_idxs):
-	# we sort the neurons of the trial slices according to their peak activity in the first slice.
-	final_sorting_idx = list()  # include the end frame
-	ordered_components = components[0][1][0][stimulus_region_sorting]
-	
-	for i, idx in enumerate(sort_idxs):
-		if i == 0:
-			comp_idx = np.argsort(np.argmax(ordered_components[:idx+1], axis=1))
-			final_sorting_idx.extend(stimulus_region_sorting[:idx+1][comp_idx])
-		else:
-			comp_idx = np.argsort(np.argmax(ordered_components[sort_idxs[i-1]+1:idx+1], axis=1))
-			final_sorting_idx.extend(stimulus_region_sorting[sort_idxs[i-1]+1:idx+1][comp_idx])
-
-	if sort_idxs[-1] != ordered_components.shape[1]:
-		comp_idx = np.argsort(np.argmax(ordered_components[sort_idxs[-1]+1:], axis=1))
-		final_sorting_idx.extend(stimulus_region_sorting[sort_idxs[-1]+1:][comp_idx])
-
-	return np.array(final_sorting_idx)
 
 
-def order_by_neuron_components(components, stimulus_region_sorting, sort_idxs):
-	final_sorting_idx = list()  # include the end frame
-	ordered_components = components[1][0][:, stimulus_region_sorting]
-
-	last_component_idxs_combined = list()  # final indices of the sorted clusters
-	neuron = components[1][0].shape[0]  # number of neuron components
-	
-	for i, idx in enumerate(sort_idxs):
-		if i == 0:  # for egg water
-			sorted_comps, sorted_idxs = sort_neurons_by_weight(ordered_components[:, :idx+1])
-			final_sorting_idx.extend(stimulus_region_sorting[:idx+1][sorted_idxs])
-
-			_, _, sort_max_fac = classify_neurons_by_weights(ordered_components[:, :idx+1])
-			# last_component_idxs = np.where(sort_max_fac[:-1] != sort_max_fac[1:])[0]
-			# if len(last_component_idxs) == 0:  # if there is only a single stimulus, take the final idx of the final element
-			# 	last_component_idxs = np.array([sort_max_fac.shape[0]])
-			last_component_idxs = list()
-			for n in range(neuron):
-				try: 
-					last_component_idxs.append(np.where(sort_max_fac == n)[0][-1])
-				except IndexError:
-					last_component_idxs.append(np.nan)
-			last_component_idxs_combined.append(last_component_idxs)
-		else:
-			sorted_comps, sorted_idxs = sort_neurons_by_weight(ordered_components[:, sort_idxs[i-1]+1:idx+1])
-			final_sorting_idx.extend(stimulus_region_sorting[sort_idxs[i-1]+1:idx+1][sorted_idxs])
-
-			_, _, sort_max_fac = classify_neurons_by_weights(ordered_components[:, sort_idxs[i-1]+1:idx+1])
-			# last_component_idxs = np.where(sort_max_fac[:-1] != sort_max_fac[1:])[0]
-			# if len(last_component_idxs) == 0:  # if there is only a single component class, take the final idx of the final element
-			# 	last_component_idxs = np.array([sort_max_fac.shape[0]])
-			last_component_idxs = list()
-			for n in range(neuron):
-				try: 
-					last_component_idxs.append(np.where(sort_max_fac == n)[0][-1])
-				except IndexError:
-					last_component_idxs.append(np.nan)
-			last_component_idxs_combined.append(last_component_idxs)
-
-	if sort_idxs[-1] != ordered_components.shape[1]:  # for AITC
-		sorted_comps, sorted_idxs = sort_neurons_by_weight(ordered_components[:, sort_idxs[-1]+1:])
-		final_sorting_idx.extend(stimulus_region_sorting[sort_idxs[-1]+1:][sorted_idxs])
-
-		_, _, sort_max_fac = classify_neurons_by_weights(ordered_components[:, sort_idxs[-1]+1:])
-		# last_component_idxs = np.where(sort_max_fac[:-1] != sort_max_fac[1:])[0]
-		# if len(last_component_idxs) == 0:  # if there is only a single stimulus, take the final idx of the final element
-		# 	last_component_idxs = np.array([sort_max_fac.shape[0]])
-		last_component_idxs = list()
-		for n in range(neuron):
-			try: 
-				last_component_idxs.append(np.where(sort_max_fac == n)[0][-1])
-			except IndexError:
-				last_component_idxs.append(np.nan)
-		last_component_idxs_combined.append(last_component_idxs)
-
-	last_component_idxs_combined = np.array(last_component_idxs_combined)
-
-	return np.array(final_sorting_idx), last_component_idxs_combined
 
 
 def embed_image(image, default_size=1024):
