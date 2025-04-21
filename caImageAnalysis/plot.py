@@ -1,9 +1,11 @@
+from kneed import KneeLocator
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
 from scipy.stats import sem
 import seaborn as sns
 
+from caImageAnalysis.sliceTCA import get_classified_neurons
 from caImageAnalysis.temporal_new import get_traces
 from caImageAnalysis.utils import sort_by_peak, sort_by_peak_with_indices
 
@@ -81,14 +83,13 @@ def plot_grouped_heatmaps(df, filterby, sort=True, key='norm_temporal',
 def plot_heatmap_with_colorbar(data, colors, sort=True, fps=1.3039181000348583, pulses=[391, 548, 704, 861, 1017], x_tick_interval=60, y_tick_interval=100):
     """
     Plots temporal components as a heatmap with a custom colorbar for row annotations.
-
     Parameters:
-    - data: 2D Numpy array, rows are neurons and columns are time points.
-    - colors: List of RGB/Hex color values for each row (length = n_neurons).
-    - sort: Whether to sort rows by their peak response time (default: True).
-    - fps: Frames per second, used to calculate time from frame indices.
-    - pulses: List of pulse frame indices to mark on the heatmap.
-    - tick_interval: Interval for time ticks on the x-axis (in seconds).
+        data: 2D Numpy array, rows are neurons and columns are time points.
+        colors: List of RGB/Hex color values for each row (length = n_neurons).
+        sort: Whether to sort rows by their peak response time (default: True).
+        fps: Frames per second, used to calculate time from frame indices.
+        pulses: List of pulse frame indices to mark on the heatmap.
+        tick_interval: Interval for time ticks on the x-axis (in seconds).
     """
     # Sort data if needed
     if sort:
@@ -234,7 +235,7 @@ def plot_neuron_traces(df, neuron_ids=None, key="raw_norm_temporal", fps=1.30391
         if sigma > 0:
             trace = gaussian_filter1d(trace, sigma=sigma)
 
-        for pulse in np.array(pulse_frames)[val]:
+        for pulse in pulse_frames[val]:
             axes[i].vlines(pulse, 0, 1, color='#e11f25')
 
         axes[i].plot(trace, color='#000000')
@@ -569,3 +570,158 @@ def plot_kde(kde_data, x_vals, colors=None, labels=None):
     plt.ylabel('Density')
     plt.legend()
     plt.xlim(min(x_vals), max(x_vals))
+
+
+def plot_loss_by_component(loss_grid, component_axis, plot_individual=False):
+	"""
+	Plots the loss for a specific component axis (trial, neuron, or time).
+	Parameters:
+		loss_grid (numpy.ndarray): The loss grid containing cross-validation losses.
+		component_axis (int): The axis to analyze (0 for trial, 1 for neuron, 2 for time).
+		plot_individual (bool, optional): Whether to plot individual traces. Defaults to False.
+	Returns:
+		None: The function directly plots the loss and elbow point.
+	Notes:
+		- The function calculates the mean and standard error of the mean (SEM) across traces.
+		- The elbow point is determined using the KneeLocator library.
+	"""
+	plt.figure()
+
+	other_axes = [i for i in range(3) if i != component_axis]
+	n_seeds = loss_grid.shape[3]
+	traces = []
+
+	for i in range(loss_grid.shape[other_axes[0]]):
+		for j in range(loss_grid.shape[other_axes[1]]):
+			for s in range(n_seeds):
+				if component_axis == 0:
+					if plot_individual:
+						plt.plot(loss_grid[:, i, j, s], color="gray", alpha=0.5)
+					traces.append(loss_grid[:, i, j, s])
+
+				elif component_axis == 1:
+					if plot_individual:
+						plt.plot(loss_grid[i, :, j, s], color="gray", alpha=0.5)
+					traces.append(loss_grid[i, :, j, s])
+
+				elif component_axis == 2:
+					if plot_individual:
+						plt.plot(loss_grid[i, j, :, s], color="gray", alpha=0.5)
+					traces.append(loss_grid[i, j, :, s])
+
+	plt.plot(np.mean(traces, axis=0), linewidth=2, color="black")
+	plt.fill_between(
+		np.arange(len(traces[0])),
+		np.mean(traces, axis=0) - sem(traces, axis=0),
+		np.mean(traces, axis=0) + sem(traces, axis=0),
+		color="black",
+		alpha=0.2
+	)
+
+	kn = KneeLocator(
+		np.arange(loss_grid.shape[component_axis]),
+		np.mean(traces, axis=0),
+		curve="convex",
+		direction="decreasing"
+	)
+	plt.axvline(kn.knee, linestyle="dashed", color="black", label=f"Elbow point at component {int(kn.knee)}")
+	plt.legend(frameon=False)
+
+	if component_axis == 0:
+		axis_name = "trial"
+	elif component_axis == 1:
+		axis_name = "neuron"
+	elif component_axis == 2:
+		axis_name = "time"
+	
+	plt.xlabel(f"Number of {axis_name} components ")
+	plt.ylabel("Cross-validation loss")
+
+
+def plot_loss_curve(model):
+	"""
+	Plot the loss curve for the given sliceTCA model.
+	Parameters:
+		model: An object that contains a `losses` attribute, which is a list of 
+			   loss values recorded during the training process.
+	Returns:
+		None
+	"""
+	plt.figure(figsize=(4, 3), dpi=100)
+	plt.plot(model.losses, 'k')
+	plt.xlabel('Iterations')
+	plt.ylabel('Mean squared error')
+	plt.xlim(0, len(model.losses))
+	plt.tight_layout()
+
+
+def plot_trial_components(axes, components):
+	"""Add graphics for sliceTCA trial components."""
+	for a, ax in enumerate(axes[0][1]):
+		ax.axvline(3, color="white")  # add the injection line on the slice
+		axes[0][0][a].plot(np.arange(4), components[0][0][a], color="tab:red")
+
+
+def plot_neuron_components(axes, classified_neuron_idxs, pre_frame_num=0):
+    """Add graphics for sliceTCA neuron components."""
+    for a, ax in enumerate(axes[1][1]):  # for each neuron component
+        ax.axvline(pre_frame_num, color="white", linewidth=2)  # add the injection line on the slice
+        
+        starts = np.append(classified_neuron_idxs[a][0], classified_neuron_idxs[a][np.where(np.diff(classified_neuron_idxs[a]) != 1)[0] + 1])
+        stops = np.append(classified_neuron_idxs[a][np.where(np.diff(classified_neuron_idxs[a]) != 1)], classified_neuron_idxs[a][-1])
+        
+        for start, stop in zip(starts, stops):
+            axes[1][0][a].axvspan(start, stop, alpha=0.2)
+
+
+def plot_time_components(axes, ticks, pre_frame_num=0):
+	"""Add graphics for sliceTCA time components."""
+	for a, ax in enumerate(axes[2][0]):
+		ax.axvline(pre_frame_num, color="red")  # add the injection line on the time components
+		for idx in ticks[:-1]:
+			axes[2][1][a].axvline(idx, linestyle="dashed", color="black")
+
+
+def plot_neuron_component_slice_traces(components, pre_frame_num, post_frame_num):
+	"""Plot the time and trial dynamic traces of neuron components"""
+	for c, comp in enumerate(components[1][1]):
+		fig, axs = plt.subplots(1, components[1][1].shape[1], sharex=True, sharey=True, figsize=(10, 2))
+		for p, pulse in enumerate(comp):
+			axs[p].plot(np.arange(0 - pre_frame_num, post_frame_num + 1), pulse)
+			axs[p].axhline(0, ls="dashed", color="black")
+			axs[p].axvspan(-1, 0, color="red", alpha=0.2)
+		fig.suptitle(f"Component {c}")
+          
+
+def plot_goodness_of_fit(gofs, last_stimulus_idxs, categories, save_path=None):
+	"""Plot goodness of fit of sliceTCA reconstruction as bar and dot plots."""
+	bar_values = []
+	dot_values = []
+
+	for s, stim_stop_idx in enumerate(last_stimulus_idxs):
+		start_idx = 0 if s == 0 else last_stimulus_idxs[s - 1] + 1
+		bar_values.append(np.mean(gofs[start_idx:stim_stop_idx + 1]))
+		dot_values.append(gofs[start_idx:stim_stop_idx + 1])
+
+	bar_values.append(np.mean(gofs[last_stimulus_idxs[-1] + 1:]))
+	dot_values.append(gofs[last_stimulus_idxs[-1] + 1:])
+
+	fig, ax = plt.subplots()
+	ax.bar(categories, bar_values, color='lightblue')
+
+	for i, cat in enumerate(categories):
+		x = [i] * len(dot_values[i])
+		jitter(x, dot_values[i], color='black', alpha=0.5)
+
+	ax.set_ylabel("Goodness of fit")
+
+	if save_path:
+		plt.savefig(save_path, transparent=True)
+          
+
+def rand_jitter(arr):
+    return arr + np.random.normal(0, 0.1, len(arr))
+
+
+def jitter(x, y, s=20, color='black', marker='o', cmap=None, norm=None, vmin=None, vmax=None, alpha=None, linewidths=None, verts=None, hold=None, **kwargs):
+    return plt.scatter(rand_jitter(x), y, s=s, color=color, marker=marker, cmap=cmap, norm=norm, vmin=vmin, vmax=vmax, alpha=alpha, linewidths=linewidths, **kwargs)
