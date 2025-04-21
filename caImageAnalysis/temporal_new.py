@@ -481,9 +481,6 @@ def get_traces(df, pre_frame_num=15, post_frame_num=13, normalize=False,
                 baseline = 0
 
             for i, pulse in enumerate(responsive_pulses):
-                if specific_pulse is not None and pulse != specific_pulse:
-                    continue
-
                 if (pulse_activity[i] == 1 and neuron['activated'] == True) or (pulse_activity[i] == 0 and neuron['suppressed'] == True):
                     start_frame = pulses[pulse-1] - pre_frame_num  # when the neuron traces will start
                     stop_frame = pulses[pulse-1] + post_frame_num  # when the neuron traces will end
@@ -499,6 +496,9 @@ def get_traces(df, pre_frame_num=15, post_frame_num=13, normalize=False,
                     elif normalize_by_first:
                         trace = (trace - baseline) / baseline
                     
+                    if specific_pulse is not None and pulse != specific_pulse:
+                        continue
+                    
                     traces.append(trace)
 
                     if return_col is not None:
@@ -513,9 +513,6 @@ def get_traces(df, pre_frame_num=15, post_frame_num=13, normalize=False,
                 baseline = 0
 
             for i, pulse in enumerate(pulses):
-                if specific_pulse is not None and i + 1 != specific_pulse:
-                    continue
-
                 start_frame = pulse - pre_frame_num  # when the neuron traces will start
                 stop_frame = pulse + post_frame_num  # when the neuron traces will end
 
@@ -530,6 +527,9 @@ def get_traces(df, pre_frame_num=15, post_frame_num=13, normalize=False,
                 elif normalize_by_first:
                     trace = (trace - baseline) / baseline
 
+                if specific_pulse is not None and i + 1 != specific_pulse:
+                    continue
+                
                 traces.append(trace)
 
                 if return_col is not None:
@@ -1359,3 +1359,34 @@ def compute_same_class_clustering_index(X, labels, max_radius, step=10, n_neighb
     same_class_clust_inds_df.index.name = "Distance (µm)"
 
     return same_class_clust_inds_df
+
+
+def sort_by_peak_with_indices(data, separate_array=None, window=10):
+    """
+    Sort the data based on peak response times and apply the same sorting to a separate array (if provided).
+    Parameters:
+        data (np.ndarray): Array to sort (e.g., neuron responses across time).
+        separate_array (np.ndarray, optional): Array to apply the same sorting indices to. Default is None.
+        window (int): Sliding window size for smoothing the data. Default is 10.
+    Returns:
+        tuple: Contains the following:
+            - sorted_data (np.ndarray): Data sorted by peak response times.
+            - sorted_separate_array (np.ndarray, optional): The separate array sorted using the same indices (if provided).
+            - sorting_indices (np.ndarray): Indices used for sorting.
+    """
+    # Calculate peak indices for each row using sliding window smoothing
+    smoothing_window = np.ones(window)
+    peak_indices = [np.argmax(np.convolve(arr, smoothing_window, 'valid')) for arr in data]
+
+    # Get the sorting indices based on peak indices
+    sorting_indices = np.argsort(peak_indices)
+
+    # Apply sorting to data
+    sorted_data = data[sorting_indices]
+
+    # Apply sorting to separate_array if provided
+    if separate_array is not None:
+        sorted_separate_array = separate_array[sorting_indices]
+        return sorted_data, sorted_separate_array, sorting_indices
+
+    return sorted_data, sorting_indices

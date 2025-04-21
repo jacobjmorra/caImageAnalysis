@@ -209,11 +209,9 @@ def fix_phase_offset(imgs, img_row, n_cols=3, show_phase_plots=True, show_update
 def sort_by_peak(data, window=10):
     """
     Sorts an array of arrays by the peak values using a sliding window sum.
-
     Parameters:
         data (list of lists): A list where each element is an array to be sorted.
         window (int): The size of the sliding window to compute the sum. Default is 10.
-
     Returns:
         list of lists: The input list sorted by the peak values of each array.
     """
@@ -225,16 +223,14 @@ def sort_by_peak(data, window=10):
 def sort_by_peak_with_indices(data, separate_array=None, window=10):
     """
     Sorts the data based on peak response times and applies the same sorting to a separate array (if provided).
-
     Parameters:
-        - data: Numpy array to sort (e.g., neuron responses across time).
-        - separate_array: Optional array to apply the same sorting indices to.
-        - window: Sliding window size for smoothing the data.
-
+        data: Numpy array to sort (e.g., neuron responses across time).
+        separate_array: Optional array to apply the same sorting indices to.
+        window: Sliding window size for smoothing the data.
     Returns:
-        - sorted_data: Data sorted by peak response times.
-        - sorted_separate_array: The separate array sorted using the same indices (if provided).
-        - sorting_indices: Indices used for sorting.
+        sorted_data: Data sorted by peak response times.
+        sorted_separate_array: The separate array sorted using the same indices (if provided).
+        sorting_indices: Indices used for sorting.
     """
     # Calculate peak indices for each row using sliding window smoothing
     smoothing_window = np.ones(window)
@@ -252,3 +248,16 @@ def sort_by_peak_with_indices(data, separate_array=None, window=10):
         return sorted_data, sorted_separate_array, sorting_indices
 
     return sorted_data, sorting_indices
+
+
+def get_last_indices(ordered_array):
+	"""
+	Get the indices where the value changes in an ordered array.
+	If the array has only one unique value, return the last index.
+	"""
+	last_indices = np.where(ordered_array[:-1] != ordered_array[1:])[0]
+	if len(last_indices) == 0:
+		last_indices = np.array([ordered_array.shape[0]])
+	return last_indices
+
+
